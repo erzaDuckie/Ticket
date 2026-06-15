@@ -810,31 +810,47 @@ async def _setup_persistent_panel():
     except Exception as e:
         log.warning(f"[PANEL] Gagal fetch claim channel: {e}")
         return
-    # Cari panel existing di channel (hindari double post)
+
+    # Cari panel existing berdasarkan custom_id komponen (lebih unik)
     found_msg = None
     try:
-        async for msg in ch.history(limit=50):
-            if msg.author == client.user and msg.embeds and "Claim Center" in str(msg.embeds[0].title):
-                found_msg = msg
+        # Scan 200 pesan terakhir (cukup untuk hindari kehilangan)
+        async for msg in ch.history(limit=200):
+            if msg.author != client.user:
+                continue
+            # Periksa apakah pesan memiliki komponen Select dengan custom_id "panel_tier_select"
+            if msg.components:
+                for row in msg.components:
+                    for component in row.children:
+                        if hasattr(component, 'custom_id') and component.custom_id == "panel_tier_select":
+                            found_msg = msg
+                            break
+                    if found_msg:
+                        break
+            if found_msg:
                 break
     except Exception as e:
         log.warning(f"[PANEL] Gagal mencari panel existing: {e}")
+
+    view = PanelView()
     if found_msg:
-        _panel_msg_id = found_msg.id
-        view = PanelView()
         try:
+            # Update embed dan re-attach view
             await found_msg.edit(embed=_build_panel_embed(), view=view)
-            client.add_view(view, message_id=_panel_msg_id)
-            log.info(f"[PANEL] Panel existing diperbarui (id={_panel_msg_id})")
+            client.add_view(view, message_id=found_msg.id)
+            _panel_msg_id = found_msg.id
+            _save_panel_msg_id(found_msg.id)  # simpan sebagai cadangan (meski nanti hilang)
+            log.info(f"[PANEL] Panel existing ditemukan dan diperbarui (id={_panel_msg_id})")
             return
         except Exception as e:
-            log.warning(f"[PANEL] Gagal edit panel: {e}")
-    # Buat panel baru jika tidak ada
-    view = PanelView()
+            log.warning(f"[PANEL] Gagal edit panel existing: {e}")
+
+    # Jika tidak ada panel lama atau gagal edit, buat baru
     try:
         msg = await ch.send(embed=_build_panel_embed(), view=view)
         _panel_msg_id = msg.id
         client.add_view(view, message_id=_panel_msg_id)
+        _save_panel_msg_id(msg.id)
         log.info(f"[PANEL] Panel baru dibuat (id={_panel_msg_id})")
     except Exception as e:
         log.warning(f"[PANEL] Gagal post panel: {e}")
