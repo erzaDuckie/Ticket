@@ -1419,11 +1419,11 @@ def clear_medium():
 
 def run_flask():
     app.run(
-        host="0.0.0.0",   # ← wajib, bukan 127.0.0.1
+        host="0.0.0.0",    
         port=FLASK_PORT,
         debug=False,
         use_reloader=False
-    )
+    ))
 
 # ============================================================
 #  BACKFILL — di-skip, antrian sudah persist via pending_queue.json
