@@ -1,0 +1,18 @@
+{
+  "high": {
+    "lv": 66,
+    "cpt": 40000,
+    "dm_not_req": "Halo {mention}! 😔\nNick **{nick}** belum memenuhi syarat pengambilan reward.\n\n📋 **Syarat {channel_name}:**\n• Minimal Level : {lv}\n• Minimal CPT   : {cpt}\n\nSilakan kembali jika sudah memenuhi syarat ya!",
+    "dm_already": "Halo {mention}! ⚠️\nNick **{nick}** sudah pernah melakukan claim reward di **{channel_name}**.\n\nJika kamu merasa ini kesalahan, silakan hubungi admin.",
+    "dm_success": "Halo {mention}! 🎉\nNick **{nick}** Reward **{channel_name}** berhasil dikirim.\n\nLakukan Relogin untuk claim reward. Jika tidak menerima silakan hubungi admin.",
+    "dm_not_found": "Halo {mention}! ❓\nNick **{nick}** tidak ditemukan di database game.\n\nPastikan nama karakter yang kamu masukkan sudah benar. Jika masih bermasalah silakan hubungi admin."
+  },
+  "medium": {
+    "lv": 45,
+    "cpt": 15000,
+    "dm_not_req": "Halo {mention}! 😔\nNick **{nick}** belum memenuhi syarat pengambilan reward.\n\n📋 **Syarat {channel_name}:**\n• Minimal Level : {lv}\n• Minimal CPT   : {cpt}\n\nSilakan kembali jika sudah memenuhi syarat ya!",
+    "dm_already": "Halo {mention}! ⚠️\nNick **{nick}** sudah pernah melakukan claim reward di **{channel_name}**.\n\nJika kamu merasa ini kesalahan, silakan hubungi admin.",
+    "dm_success": "Halo {mention}! 🎉\nNick **{nick}** Reward **{channel_name}** berhasil dikirim.\n\nLakukan Relogin untuk claim reward. Jika tidak menerima silakan hubungi admin.",
+    "dm_not_found": "Halo {mention}! ❓\nNick **{nick}** tidak ditemukan di database game.\n\nPastikan nama karakter yang kamu masukkan sudah benar. Jika masih bermasalah silakan hubungi admin."
+  }
+}
