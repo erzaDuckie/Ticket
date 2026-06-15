@@ -88,7 +88,7 @@ _wl_raw       = os.environ.get("WHITELIST_IDS", "")
 WHITELIST_IDS = set(int(x.strip()) for x in _wl_raw.split(",") if x.strip().isdigit())
 
 MAX_CLAIM  = int(os.environ.get("MAX_CLAIM", "5"))
-FLASK_PORT = int(os.environ.get("FLASK_PORT", "5678"))
+FLASK_PORT = int(os.environ.get("PORT", os.environ.get("FLASK_PORT", "5678")))
 GUILD_ID   = int(os.environ.get("GUILD_ID", "0"))
 
 AUTO_DELETE_SECONDS = int(os.environ.get("AUTO_DELETE_SECONDS", "60"))
@@ -1418,9 +1418,12 @@ def clear_medium():
     return jsonify({"ok": True})
 
 def run_flask():
-    import logging as _logging
-    _logging.getLogger("werkzeug").setLevel(_logging.WARNING)
-    app.run(host='127.0.0.1', port=FLASK_PORT, debug=False, use_reloader=False)
+    app.run(
+        host="0.0.0.0",   # ← wajib, bukan 127.0.0.1
+        port=FLASK_PORT,
+        debug=False,
+        use_reloader=False
+    )
 
 # ============================================================
 #  BACKFILL — di-skip, antrian sudah persist via pending_queue.json
