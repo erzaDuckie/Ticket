@@ -24,17 +24,9 @@ if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 # ============================================================
-#  DATA DIR — Railway Volume atau lokal
-#  Set env var DATA_DIR ke mount path volume Railway (/data)
-#  Kalau tidak diset, pakai folder yang sama dengan script ini
-# ============================================================
-DATA_DIR = os.environ.get("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
-os.makedirs(DATA_DIR, exist_ok=True)
-
-# ============================================================
 #  LOGGING — ke file dan konsol sekaligus
 # ============================================================
-_log_file = os.path.join(DATA_DIR, "nick_watcher.log")
+_log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nick_watcher.log")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(message)s",
@@ -63,16 +55,6 @@ def _load_env(path="config.env"):
 
 _load_env()
 
-# ============================================================
-#  CEK ENVIRONMENT VARIABLES WAJIB
-# ============================================================
-required_env = ["BOT_TOKEN", "FLASK_SECRET", "CLAIM_CHANNEL", "LOG_CHANNEL_HIGH", "LOG_CHANNEL_MED", "GUILD_ID"]
-missing = [v for v in required_env if not os.environ.get(v)]
-if missing:
-    log.error(f"Environment variables tidak diset: {', '.join(missing)}")
-    log.error("Bot akan berhenti. Set variabel tersebut di Railway Dashboard.")
-    sys.exit(1)
-
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 if not BOT_TOKEN:
     raise RuntimeError(
@@ -98,7 +80,7 @@ _wl_raw       = os.environ.get("WHITELIST_IDS", "")
 WHITELIST_IDS = set(int(x.strip()) for x in _wl_raw.split(",") if x.strip().isdigit())
 
 MAX_CLAIM  = int(os.environ.get("MAX_CLAIM", "5"))
-FLASK_PORT = int(os.environ.get("PORT", os.environ.get("FLASK_PORT", "5678")))
+FLASK_PORT = int(os.environ.get("FLASK_PORT", "5678"))
 GUILD_ID   = int(os.environ.get("GUILD_ID", "0"))
 
 AUTO_DELETE_SECONDS = int(os.environ.get("AUTO_DELETE_SECONDS", "60"))
@@ -108,7 +90,7 @@ AUTO_DELETE_SECONDS = int(os.environ.get("AUTO_DELETE_SECONDS", "60"))
 #  Format key: "nick_lower:discord_user_id"
 #  Setelah DM_NICK_LIMIT kali, DM berikutnya dilewati
 # ============================================================
-DM_NICK_FILE  = os.path.join(DATA_DIR, "dm_nick_counts.json")
+DM_NICK_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dm_nick_counts.json")
 DM_NICK_LIMIT = int(os.environ.get("DM_NICK_LIMIT", "2"))
 
 def _load_dm_nick_counts() -> dict:
@@ -132,7 +114,7 @@ dm_nick_counts: dict = _load_dm_nick_counts()
 # ============================================================
 #  REQUIREMENTS & DM TEMPLATE — dibaca dari requirements.json
 # ============================================================
-REQUIREMENTS_FILE = os.path.join(DATA_DIR, "DM.json")
+REQUIREMENTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "DM.json")
 
 def _load_requirements():
     try:
@@ -172,7 +154,7 @@ EMOJI_BLOCK   = "\U0001f6ab"    # 🚫
 # ============================================================
 #  PERSISTENT CLAIMS
 # ============================================================
-CLAIMS_FILE = os.path.join(DATA_DIR, "claims.json")
+CLAIMS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claims.json")
 
 def _load_claims():
     try:
@@ -201,8 +183,8 @@ claim_counts_high, claim_counts_medium = _load_claims()
 # ============================================================
 #  PERSISTENSI ANTRIAN — simpan/load pending_high & pending_medium
 # ============================================================
-PENDING_FILE    = os.path.join(DATA_DIR, "pending_queue.json")
-PROCESSED_FILE  = os.path.join(DATA_DIR, "processed_queue.json")
+PENDING_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pending_queue.json")
+PROCESSED_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "processed_queue.json")
 
 def _save_pending():
     try:
@@ -995,7 +977,7 @@ _active_wizards: dict[int, ClaimWizard] = {}
 # ============================================================
 #  PANEL FILE — atomic write untuk panel_msg.json
 # ============================================================
-PANEL_FILE = os.path.join(DATA_DIR, "panel_msg.json")
+PANEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel_msg.json")
 
 def _load_panel_msg_id() -> int | None:
     try:
@@ -1188,7 +1170,7 @@ def require_secret():
 #  FLASK SERVER
 # ============================================================
 app = Flask(__name__)
-CORS(app, origins=["chrome-extension://*"])
+CORS(app, origins=["*"], allow_headers=["Content-Type", "X-GCP-Token"], methods=["GET", "POST", "OPTIONS"])
 
 def _fmt_entry(e: dict) -> dict:
     return {
@@ -1428,12 +1410,9 @@ def clear_medium():
     return jsonify({"ok": True})
 
 def run_flask():
-    app.run(
-        host="0.0.0.0",   # ← ganti dari 127.0.0.1
-        port=FLASK_PORT,
-        debug=False,
-        use_reloader=False
-    )
+    import logging as _logging
+    _logging.getLogger("werkzeug").setLevel(_logging.WARNING)
+    app.run(host='127.0.0.1', port=FLASK_PORT, debug=False, use_reloader=False)
 
 # ============================================================
 #  BACKFILL — di-skip, antrian sudah persist via pending_queue.json
@@ -1636,7 +1615,7 @@ async def on_message(message: discord.Message):
     elif cmd == "!synccmds":
         sent = await message.reply("🔄 Sync slash commands...")
         asyncio.ensure_future(_auto_delete(sent, AUTO_DELETE_SECONDS))
-        _sync_flag = os.path.join(DATA_DIR, "sync_done.flag")
+        _sync_flag = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sync_done.flag")
         try:
             if GUILD_ID:
                 guild = discord.Object(id=GUILD_ID)
@@ -1698,7 +1677,7 @@ async def on_ready():
 
     # Sync slash commands — hanya dilakukan sekali (ada flag file).
     # Untuk force sync ulang, hapus file sync_done.flag atau pakai !synccmds.
-    _sync_flag = os.path.join(DATA_DIR, "sync_done.flag")
+    _sync_flag = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sync_done.flag")
     _need_sync = not os.path.exists(_sync_flag)
     if _need_sync:
         try:
@@ -1741,7 +1720,7 @@ async def on_ready():
 if __name__ == '__main__':
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    log.info(f"[SERVER] Flask server started at http://0.0.0.0:{FLASK_PORT}")
+    log.info(f"[SERVER] Flask server started at http://127.0.0.1:{FLASK_PORT}")
     log.info(f"[SERVER] Endpoints High   : POST /pending/take  POST /result  GET /status  POST /clear")
     log.info(f"[SERVER] Endpoints Medium : POST /pending_medium/take  POST /result_medium  GET /status_medium  POST /clear_medium")
 
