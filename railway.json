@@ -1,9 +1,24 @@
+
+JSON
+
 {
-  "$schema": "https://railway.app/railway-schema.json",
+  "$schema": "https://railway.com/railway.schema.json",
   "build": {
-    "builder": "NIXPACKS"
+    "builder": "NIXPACKS",
+    "buildEnvironment": "V3"
   },
   "deploy": {
+    "runtime": "V2",
+    "numReplicas": 1,
+    "startCommand": "python nick_watcher.py",
+    "sleepApplication": false,
+    "useLegacyStacker": false,
+    "ipv6EgressEnabled": false,
+    "multiRegionConfig": {
+      "sfo": {
+        "numReplicas": 1
+      }
+    },
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }
