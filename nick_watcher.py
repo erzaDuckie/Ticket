@@ -63,6 +63,16 @@ def _load_env(path="config.env"):
 
 _load_env()
 
+# ============================================================
+#  CEK ENVIRONMENT VARIABLES WAJIB
+# ============================================================
+required_env = ["BOT_TOKEN", "FLASK_SECRET", "CLAIM_CHANNEL", "LOG_CHANNEL_HIGH", "LOG_CHANNEL_MED", "GUILD_ID"]
+missing = [v for v in required_env if not os.environ.get(v)]
+if missing:
+    log.error(f"Environment variables tidak diset: {', '.join(missing)}")
+    log.error("Bot akan berhenti. Set variabel tersebut di Railway Dashboard.")
+    sys.exit(1)
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 if not BOT_TOKEN:
     raise RuntimeError(
@@ -1731,7 +1741,7 @@ async def on_ready():
 if __name__ == '__main__':
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    log.info(f"[SERVER] Flask server started at http://127.0.0.1:{FLASK_PORT}")
+    log.info(f"[SERVER] Flask server started at http://0.0.0.0:{FLASK_PORT}")
     log.info(f"[SERVER] Endpoints High   : POST /pending/take  POST /result  GET /status  POST /clear")
     log.info(f"[SERVER] Endpoints Medium : POST /pending_medium/take  POST /result_medium  GET /status_medium  POST /clear_medium")
 
