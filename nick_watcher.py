@@ -280,6 +280,83 @@ def _trim_processed(od: OrderedDict):
         od.popitem(last=False)
 
 # ============================================================
+#  GM REGISTRY — nama GM, status online, command queue (remote stop)
+# ============================================================
+GM_REGISTRY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gm_registry.json")
+GM_ONLINE_THRESHOLD_SECONDS = 15  # dianggap online kalau heartbeat terakhir < ini
+
+def _load_gm_registry() -> dict:
+    try:
+        with open(GM_REGISTRY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            for v in data.values():
+                v["commands"] = []  # jangan persist command pending lintas restart
+            return data
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def _save_gm_registry():
+    try:
+        tmp = GM_REGISTRY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(
+                {gid: {"name": v.get("name", ""), "last_seen": v.get("last_seen", ""), "channel": v.get("channel", "")}
+                 for gid, v in gm_registry.items()},
+                f, indent=2
+            )
+        os.replace(tmp, GM_REGISTRY_FILE)
+    except Exception as e:
+        log.warning(f"[WARN] Gagal simpan gm_registry.json: {e}")
+
+gm_registry: dict = _load_gm_registry()
+
+def _touch_gm(gm_id: str, gm_name: str, channel: str):
+    """Heartbeat — dipanggil setiap kali GM poll /pending/take atau lapor /result."""
+    if not gm_id or gm_id == "unknown":
+        return
+    with lock:
+        entry = gm_registry.setdefault(gm_id, {"commands": []})
+        if gm_name:
+            entry["name"] = gm_name
+        entry["channel"] = channel
+        entry["last_seen"] = datetime.now(timezone.utc).isoformat()
+    _save_gm_registry()
+
+def _gm_display(gm_id: str) -> str:
+    entry = gm_registry.get(gm_id)
+    if entry and entry.get("name"):
+        return entry["name"]
+    return gm_id
+
+def _find_gm_id(target: str):
+    """Cari gm_id berdasarkan nama (case-insensitive) atau gm_id langsung."""
+    if target in gm_registry:
+        return target
+    target_l = target.strip().lower()
+    for gid, v in gm_registry.items():
+        if v.get("name", "").strip().lower() == target_l:
+            return gid
+    return None
+
+def _pop_gm_commands(gm_id: str) -> list:
+    """Ambil & kosongkan command queue milik gm_id (dipanggil saat /pending/take)."""
+    if not gm_id or gm_id == "unknown":
+        return []
+    with lock:
+        entry = gm_registry.get(gm_id)
+        if not entry or not entry.get("commands"):
+            return []
+        cmds = entry["commands"]
+        entry["commands"] = []
+    _save_gm_registry()
+    return cmds
+
+def _queue_gm_command(gm_id: str, command: str):
+    with lock:
+        entry = gm_registry.setdefault(gm_id, {"commands": []})
+        entry.setdefault("commands", []).append(command)
+
+# ============================================================
 #  HELPER FUNCTIONS
 # ============================================================
 async def _auto_delete(msg, delay: int):
@@ -883,7 +960,9 @@ def _process_result(queue: list, in_progress: dict, processed: OrderedDict, coun
     nick = data.get("nick", "").strip()
     status = data.get("status", "failed")
     gm_id = data.get("gm_id", "unknown")
+    gm_name = data.get("gm_name", "")
     ip_key = data.get("ip_key", "").strip()
+    _touch_gm(gm_id, gm_name, "high" if tier_label == "HIGH" else "medium")
     log_ch_id = log_msg_id = None
     entry = None
     if not nick and not ip_key:
@@ -908,7 +987,7 @@ def _process_result(queue: list, in_progress: dict, processed: OrderedDict, coun
             log_ch_id = entry.get("log_ch_id")
             log_msg_id = entry.get("log_msg_id")
             author_id = entry["author_id"]
-            log.info(f"[RESULT-{tier_label}] {nick} -> {status} (gm: {gm_id})")
+            log.info(f"[RESULT-{tier_label}] {nick} -> {status} (gm: {_gm_display(gm_id)})")
             if status == "success":
                 if author_id not in WHITELIST_IDS:
                     counts[author_id] = counts.get(author_id, 0) + 1
@@ -930,11 +1009,15 @@ def _process_result(queue: list, in_progress: dict, processed: OrderedDict, coun
 def take_pending_high():
     err = require_secret()
     if err: return err
-    gm_id = (request.json or {}).get("gm_id", "unknown")
+    body = request.json or {}
+    gm_id   = body.get("gm_id", "unknown")
+    gm_name = body.get("gm_name", "")
+    _touch_gm(gm_id, gm_name, "high")
+    commands = _pop_gm_commands(gm_id)
     with lock:
         _cleanup_expired_inprogress()
         if not pending_high:
-            return jsonify({"entry": None, "queue_size": 0})
+            return jsonify({"entry": None, "queue_size": 0, "commands": commands})
         entry = None
         corrupt = []
         for e in pending_high:
@@ -953,14 +1036,14 @@ def take_pending_high():
         if corrupt:
             _save_pending()
         if not entry:
-            return jsonify({"entry": None, "queue_size": 0})
+            return jsonify({"entry": None, "queue_size": 0, "commands": commands})
         ip_key = _make_ip_key(entry)
         in_progress_high[ip_key] = {"entry": entry, "taken_at": datetime.now(timezone.utc), "gm_id": gm_id}
         size = len(pending_high)
-    log.info(f"[TAKE-HIGH] {entry['nick']} -> gm:{gm_id}")
+    log.info(f"[TAKE-HIGH] {entry['nick']} -> gm:{_gm_display(gm_id)}")
     out = _fmt_entry(entry)
     out["ip_key"] = ip_key
-    return jsonify({"entry": out, "queue_size": size})
+    return jsonify({"entry": out, "queue_size": size, "commands": commands})
 
 @app.route('/result', methods=['POST'])
 def result_high():
@@ -1000,11 +1083,15 @@ def clear_high():
 def take_pending_medium():
     err = require_secret()
     if err: return err
-    gm_id = (request.json or {}).get("gm_id", "unknown")
+    body = request.json or {}
+    gm_id   = body.get("gm_id", "unknown")
+    gm_name = body.get("gm_name", "")
+    _touch_gm(gm_id, gm_name, "medium")
+    commands = _pop_gm_commands(gm_id)
     with lock:
         _cleanup_expired_inprogress()
         if not pending_medium:
-            return jsonify({"entry": None, "queue_size": 0})
+            return jsonify({"entry": None, "queue_size": 0, "commands": commands})
         entry = None
         corrupt = []
         for e in pending_medium:
@@ -1023,14 +1110,14 @@ def take_pending_medium():
         if corrupt:
             _save_pending()
         if not entry:
-            return jsonify({"entry": None, "queue_size": 0})
+            return jsonify({"entry": None, "queue_size": 0, "commands": commands})
         ip_key = _make_ip_key(entry)
         in_progress_medium[ip_key] = {"entry": entry, "taken_at": datetime.now(timezone.utc), "gm_id": gm_id}
         size = len(pending_medium)
-    log.info(f"[TAKE-MEDIUM] {entry['nick']} -> gm:{gm_id}")
+    log.info(f"[TAKE-MEDIUM] {entry['nick']} -> gm:{_gm_display(gm_id)}")
     out = _fmt_entry(entry)
     out["ip_key"] = ip_key
-    return jsonify({"entry": out, "queue_size": size})
+    return jsonify({"entry": out, "queue_size": size, "commands": commands})
 
 @app.route('/result_medium', methods=['POST'])
 def result_medium():
@@ -1117,7 +1204,52 @@ async def on_message(message: discord.Message):
     cmd = message.content.strip().lower()
     parts = message.content.strip().split(maxsplit=1)
 
-    if cmd == "!resetclaims":
+    if parts[0].lower() == "!stopgm":
+        if len(parts) < 2:
+            sent = await message.reply("⚠️ Format: `!stopgm <nama_atau_gm_id> [high|medium|all]` (default: all)")
+        else:
+            tokens = parts[1].split()
+            channel_arg = "all"
+            if tokens[-1].lower() in ("high", "medium", "all") and len(tokens) > 1:
+                channel_arg = tokens[-1].lower()
+                target_raw = " ".join(tokens[:-1])
+            else:
+                target_raw = parts[1]
+            gid = _find_gm_id(target_raw.strip())
+            if not gid:
+                sent = await message.reply(f"⚠️ GM **{target_raw}** tidak ditemukan. Cek nama yang aktif lewat `!listgm`.")
+            else:
+                cmd_map = {"high": "stop_high", "medium": "stop_medium", "all": "stop_all"}
+                _queue_gm_command(gid, cmd_map[channel_arg])
+                sent = await message.reply(
+                    f"🛑 Perintah **{cmd_map[channel_arg]}** dikirim ke GM **{_gm_display(gid)}** "
+                    f"— akan dieksekusi saat extension poll berikutnya (±5 detik)."
+                )
+        asyncio.ensure_future(_auto_delete(sent, AUTO_DELETE_SECONDS))
+    elif cmd == "!listgm":
+        with lock:
+            now = datetime.now(timezone.utc)
+            lines = ["📋 **Daftar GM**"]
+            if not gm_registry:
+                lines.append("_(belum ada GM yang pernah konek)_")
+            for gid, v in sorted(gm_registry.items(), key=lambda kv: (kv[1].get("name") or kv[0]).lower()):
+                name = v.get("name") or "_(nama belum diisi)_"
+                ch   = v.get("channel", "-")
+                raw  = v.get("last_seen")
+                if raw:
+                    try:
+                        delta = (now - datetime.fromisoformat(raw)).total_seconds()
+                        status_txt = f"🟢 online ({ch})" if delta < GM_ONLINE_THRESHOLD_SECONDS else f"⚪ idle {int(delta)}s lalu ({ch})"
+                    except Exception:
+                        status_txt = "❓"
+                else:
+                    status_txt = "❓"
+                pending_cmds = v.get("commands") or []
+                cmd_note = f" — ⏳ command pending: {', '.join(pending_cmds)}" if pending_cmds else ""
+                lines.append(f"• **{name}** — `{gid}` — {status_txt}{cmd_note}")
+        sent = await message.reply("\n".join(lines))
+        asyncio.ensure_future(_auto_delete(sent, AUTO_DELETE_SECONDS))
+    elif cmd == "!resetclaims":
         claim_counts_high.clear()
         claim_counts_medium.clear()
         _save_claims()
