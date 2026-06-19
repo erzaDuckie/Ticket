@@ -26,14 +26,8 @@ if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
 # ============================================================
 #  LOGGING — ke file dan konsol sekaligus
 # ============================================================
-# ============================================================
-#  DATA DIR — /data jika Railway volume tersedia, else local
-# ============================================================
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR  = "/data" if os.path.isdir("/data") else _BASE_DIR
-os.makedirs(DATA_DIR, exist_ok=True)
-
-_log_file = os.path.join(DATA_DIR, "nick_watcher.log")
+_log_file = os.path.join(_BASE_DIR, "nick_watcher.log")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(message)s",
@@ -87,15 +81,81 @@ _wl_raw       = os.environ.get("WHITELIST_IDS", "")
 WHITELIST_IDS = set(int(x.strip()) for x in _wl_raw.split(",") if x.strip().isdigit())
 
 MAX_CLAIM  = int(os.environ.get("MAX_CLAIM", "5"))
-FLASK_PORT = int(os.environ.get("FLASK_PORT", "5678"))  # fallback jika tidak pakai PORT
+FLASK_PORT = int(os.environ.get("FLASK_PORT", "5678"))
 GUILD_ID   = int(os.environ.get("GUILD_ID", "0"))
 
 AUTO_DELETE_SECONDS = int(os.environ.get("AUTO_DELETE_SECONDS", "60"))
 
 # ============================================================
+#  DATA DIR — persistent volume Railway di-mount ke /data
+# ============================================================
+DATA_DIR = os.environ.get("DATA_DIR", "/data")
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    # test write permission
+    _test_path = os.path.join(DATA_DIR, ".write_test")
+    with open(_test_path, "w") as _tf:
+        _tf.write("ok")
+    os.remove(_test_path)
+    log.info(f"[DATA] Menggunakan DATA_DIR: {DATA_DIR}")
+except Exception as _e:
+    # fallback ke direktori script jika /data tidak bisa ditulis
+    DATA_DIR = _BASE_DIR
+    log.warning(f"[DATA] /data tidak dapat ditulis ({_e}), fallback ke: {DATA_DIR}")
+
+def _data_path(filename: str) -> str:
+    return os.path.join(DATA_DIR, filename)
+
+def _safe_save(filepath: str, data, *, is_json=True, json_kwargs=None):
+    """
+    Atomic write: tulis ke .tmp dulu lalu os.replace.
+    Fallback ke direct write jika os.replace gagal (cross-device).
+    """
+    tmp = filepath + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            if is_json:
+                json.dump(data, f, **(json_kwargs or {"indent": 2}))
+            else:
+                f.write(data)
+        os.replace(tmp, filepath)
+    except OSError as e:
+        log.warning(f"[SAVE] atomic replace gagal ({e}), fallback direct write: {filepath}")
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                if is_json:
+                    json.dump(data, f, **(json_kwargs or {"indent": 2}))
+                else:
+                    f.write(data)
+        except Exception as e2:
+            log.error(f"[SAVE] Gagal simpan {filepath}: {e2}")
+    except Exception as e:
+        log.error(f"[SAVE] Gagal simpan {filepath}: {e}")
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+
+# ============================================================
+#  FILE PATHS — semua persistent data ke DATA_DIR
+# ============================================================
+DM_NICK_FILE      = _data_path("dm_nick_counts.json")
+CLAIMS_FILE       = _data_path("claims.json")
+PENDING_FILE      = _data_path("pending_queue.json")
+PROCESSED_FILE    = _data_path("processed_queue.json")
+GM_REGISTRY_FILE  = _data_path("gm_registry.json")
+PANEL_FILE        = _data_path("panel_msg.json")
+REQUIREMENTS_FILE = os.path.join(_BASE_DIR, "DM.json")  # config statis, di source
+
+# ============================================================
 #  DM NICK COUNT — batasi berapa kali DM dikirim per nick
 # ============================================================
-DM_NICK_FILE  = os.path.join(DATA_DIR, "dm_nick_counts.json")
 DM_NICK_LIMIT = int(os.environ.get("DM_NICK_LIMIT", "2"))
 
 def _load_dm_nick_counts() -> dict:
@@ -106,21 +166,13 @@ def _load_dm_nick_counts() -> dict:
         return {}
 
 def _save_dm_nick_counts():
-    try:
-        tmp = DM_NICK_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(dm_nick_counts, f, indent=2)
-        os.replace(tmp, DM_NICK_FILE)
-    except Exception as e:
-        log.warning(f"[WARN] Gagal simpan dm_nick_counts.json: {e}")
+    _safe_save(DM_NICK_FILE, dm_nick_counts)
 
 dm_nick_counts: dict = _load_dm_nick_counts()
 
 # ============================================================
 #  REQUIREMENTS & DM TEMPLATE — dibaca dari DM.json
 # ============================================================
-REQUIREMENTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "DM.json")
-
 def _load_requirements():
     try:
         with open(REQUIREMENTS_FILE, "r", encoding="utf-8") as f:
@@ -153,8 +205,6 @@ EMOJI_BLOCK   = "\U0001f6ab"    # 🚫
 # ============================================================
 #  PERSISTENT CLAIMS
 # ============================================================
-CLAIMS_FILE = os.path.join(DATA_DIR, "claims.json")
-
 def _load_claims():
     try:
         with open(CLAIMS_FILE, "r") as f:
@@ -166,33 +216,18 @@ def _load_claims():
         return {}, {}
 
 def _save_claims():
-    try:
-        tmp = CLAIMS_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({
-                "high":   {str(k): v for k, v in claim_counts_high.items()},
-                "medium": {str(k): v for k, v in claim_counts_medium.items()},
-            }, f, indent=2)
-        os.replace(tmp, CLAIMS_FILE)
-    except Exception as e:
-        log.warning(f"[WARN] Gagal simpan claims.json: {e}")
+    _safe_save(CLAIMS_FILE, {
+        "high":   {str(k): v for k, v in claim_counts_high.items()},
+        "medium": {str(k): v for k, v in claim_counts_medium.items()},
+    })
 
 claim_counts_high, claim_counts_medium = _load_claims()
 
 # ============================================================
 #  PERSISTENSI ANTRIAN
 # ============================================================
-PENDING_FILE    = os.path.join(DATA_DIR, "pending_queue.json")
-PROCESSED_FILE  = os.path.join(DATA_DIR, "processed_queue.json")
-
 def _save_pending():
-    try:
-        tmp = PENDING_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"high": pending_high, "medium": pending_medium}, f, indent=2)
-        os.replace(tmp, PENDING_FILE)
-    except Exception as e:
-        log.warning(f"[WARN] Gagal simpan pending_queue.json: {e}")
+    _safe_save(PENDING_FILE, {"high": pending_high, "medium": pending_medium})
 
 def _load_pending():
     try:
@@ -213,16 +248,10 @@ def _load_pending():
         return [], []
 
 def _save_processed():
-    try:
-        tmp = PROCESSED_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({
-                "high":   list(processed_high.keys())[-MAX_PROCESSED:],
-                "medium": list(processed_medium.keys())[-MAX_PROCESSED:],
-            }, f, indent=2)
-        os.replace(tmp, PROCESSED_FILE)
-    except Exception as e:
-        log.warning(f"[WARN] Gagal simpan processed_queue.json: {e}")
+    _safe_save(PROCESSED_FILE, {
+        "high":   list(processed_high.keys())[-MAX_PROCESSED:],
+        "medium": list(processed_medium.keys())[-MAX_PROCESSED:],
+    })
 
 def _load_processed() -> tuple[OrderedDict, OrderedDict]:
     try:
@@ -287,38 +316,33 @@ def _trim_processed(od: OrderedDict):
         od.popitem(last=False)
 
 # ============================================================
-#  GM REGISTRY — nama GM, status online, command queue (remote stop)
+#  GM REGISTRY
 # ============================================================
-GM_REGISTRY_FILE = os.path.join(DATA_DIR, "gm_registry.json")
-GM_ONLINE_THRESHOLD_SECONDS = 15  # dianggap online kalau heartbeat terakhir < ini
+GM_ONLINE_THRESHOLD_SECONDS = 15
 
 def _load_gm_registry() -> dict:
     try:
         with open(GM_REGISTRY_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             for v in data.values():
-                v["commands"] = []  # jangan persist command pending lintas restart
+                v["commands"] = []
             return data
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
 def _save_gm_registry():
-    try:
-        tmp = GM_REGISTRY_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(
-                {gid: {"name": v.get("name", ""), "last_seen": v.get("last_seen", ""), "channel": v.get("channel", "")}
-                 for gid, v in gm_registry.items()},
-                f, indent=2
-            )
-        os.replace(tmp, GM_REGISTRY_FILE)
-    except Exception as e:
-        log.warning(f"[WARN] Gagal simpan gm_registry.json: {e}")
+    _safe_save(GM_REGISTRY_FILE, {
+        gid: {
+            "name":      v.get("name", ""),
+            "last_seen": v.get("last_seen", ""),
+            "channel":   v.get("channel", ""),
+        }
+        for gid, v in gm_registry.items()
+    })
 
 gm_registry: dict = _load_gm_registry()
 
 def _touch_gm(gm_id: str, gm_name: str, channel: str):
-    """Heartbeat — dipanggil setiap kali GM poll /pending/take atau lapor /result."""
     if not gm_id or gm_id == "unknown":
         return
     with lock:
@@ -336,7 +360,6 @@ def _gm_display(gm_id: str) -> str:
     return gm_id
 
 def _find_gm_id(target: str):
-    """Cari gm_id berdasarkan nama (case-insensitive) atau gm_id langsung."""
     if target in gm_registry:
         return target
     target_l = target.strip().lower()
@@ -346,7 +369,6 @@ def _find_gm_id(target: str):
     return None
 
 def _pop_gm_commands(gm_id: str) -> list:
-    """Ambil & kosongkan command queue milik gm_id (dipanggil saat /pending/take)."""
     if not gm_id or gm_id == "unknown":
         return []
     with lock:
@@ -420,9 +442,9 @@ def _build_dm_message(channel_key: str, status: str, nick: str, mention: str, ch
     if not cfg:
         return None
     template_map = {
-        "not_req": cfg.get("dm_not_req", ""),
-        "already": cfg.get("dm_already", ""),
-        "success": cfg.get("dm_success", ""),
+        "not_req":  cfg.get("dm_not_req", ""),
+        "already":  cfg.get("dm_already", ""),
+        "success":  cfg.get("dm_success", ""),
         "not_found": cfg.get("dm_not_found", ""),
     }
     template = template_map.get(status)
@@ -498,7 +520,7 @@ def _build_claim_embed(nick: str, tier_label: str, panel: str, choices: dict, au
     return embed
 
 # ============================================================
-#  DISCORD UI COMPONENTS (Wizard, Select, dll)
+#  DISCORD UI COMPONENTS
 # ============================================================
 class ItemSelect(ui.Select):
     def __init__(self, item: dict, wizard: "ClaimWizard"):
@@ -506,6 +528,7 @@ class ItemSelect(ui.Select):
         self.wizard   = wizard
         options = [discord.SelectOption(label=opt, value=opt) for opt in item["options"]]
         super().__init__(placeholder=f"Pilih {item['label']}...", options=options, min_values=1, max_values=1)
+
     async def callback(self, interaction: discord.Interaction):
         try:
             self.wizard.choices[self.item_key] = self.values[0]
@@ -519,11 +542,14 @@ class ItemSelectView(ui.View):
         super().__init__(timeout=FORM_TIMEOUT)
         self.wizard = wizard
         self.add_item(ItemSelect(item, wizard))
+
     async def on_timeout(self):
         await self.wizard.on_timeout()
+
     @ui.button(label="✏️ Mulai Ulang", style=discord.ButtonStyle.secondary, row=1)
     async def restart_btn(self, interaction: discord.Interaction, button: ui.Button):
         await self.wizard.restart(interaction)
+
     @ui.button(label="❌ Batal", style=discord.ButtonStyle.danger, row=1)
     async def cancel_btn(self, interaction: discord.Interaction, button: ui.Button):
         await self.wizard.cancel(interaction)
@@ -532,14 +558,18 @@ class ConfirmView(ui.View):
     def __init__(self, wizard: "ClaimWizard"):
         super().__init__(timeout=FORM_TIMEOUT)
         self.wizard = wizard
+
     async def on_timeout(self):
         await self.wizard.on_timeout()
+
     @ui.button(label="✅ Konfirmasi & Submit", style=discord.ButtonStyle.success)
     async def confirm_btn(self, interaction: discord.Interaction, button: ui.Button):
         await self.wizard.submit(interaction)
+
     @ui.button(label="✏️ Mulai Ulang", style=discord.ButtonStyle.secondary)
     async def restart_btn(self, interaction: discord.Interaction, button: ui.Button):
         await self.wizard.restart(interaction)
+
     @ui.button(label="❌ Batal", style=discord.ButtonStyle.danger)
     async def cancel_btn(self, interaction: discord.Interaction, button: ui.Button):
         await self.wizard.cancel(interaction)
@@ -548,6 +578,7 @@ class CancelWizardView(ui.View):
     def __init__(self, user_id: int):
         super().__init__(timeout=60)
         self.user_id = user_id
+
     @ui.button(label="🔄 Lanjutkan Form", style=discord.ButtonStyle.primary)
     async def resume_btn(self, interaction: discord.Interaction, button: ui.Button):
         if interaction.user.id != self.user_id:
@@ -577,6 +608,7 @@ class CancelWizardView(ui.View):
         else:
             wizard._step = next_step + 2
             await wizard._show_item_step(interaction)
+
     @ui.button(label="🗑️ Batalkan Form Lama", style=discord.ButtonStyle.danger)
     async def cancel_btn(self, interaction: discord.Interaction, button: ui.Button):
         if interaction.user.id != self.user_id:
@@ -590,9 +622,11 @@ class CancelWizardView(ui.View):
 
 class NickTierModal(ui.Modal, title="Claim RF Online"):
     nick_input = ui.TextInput(label="Nick in-game", placeholder="Masukkan nick kamu...", min_length=1, max_length=20)
+
     def __init__(self, wizard: "ClaimWizard"):
         super().__init__()
         self.wizard = wizard
+
     async def on_submit(self, interaction: discord.Interaction):
         self.wizard._modal_submitted = True
         nick = self.nick_input.value.strip()
@@ -604,6 +638,7 @@ class NickTierModal(ui.Modal, title="Claim RF Online"):
             await self.wizard.start_item_steps(interaction)
         else:
             await self.wizard.show_tier_step(interaction)
+
     async def on_error(self, interaction: discord.Interaction, error: Exception):
         log.warning(f"[ERROR-MODAL] {error}")
         _active_wizards.pop(self.wizard.user.id, None)
@@ -614,6 +649,7 @@ class TierSelect(ui.Select):
         self.wizard = wizard
         options = [discord.SelectOption(label=t["label"], value=t["label"], emoji=t.get("emoji", "🎫")) for t in CLAIM_TIERS]
         super().__init__(placeholder="Pilih paket claim...", options=options)
+
     async def callback(self, interaction: discord.Interaction):
         try:
             self.wizard.tier = self.values[0]
@@ -627,11 +663,14 @@ class TierSelectView(ui.View):
         super().__init__(timeout=FORM_TIMEOUT)
         self.wizard = wizard
         self.add_item(TierSelect(wizard))
+
     async def on_timeout(self):
         await self.wizard.on_timeout()
+
     @ui.button(label="✏️ Mulai Ulang", style=discord.ButtonStyle.secondary, row=1)
     async def restart_btn(self, interaction: discord.Interaction, button: ui.Button):
         await self.wizard.restart(interaction)
+
     @ui.button(label="❌ Batal", style=discord.ButtonStyle.danger, row=1)
     async def cancel_btn(self, interaction: discord.Interaction, button: ui.Button):
         await self.wizard.cancel(interaction)
@@ -648,21 +687,25 @@ class ClaimWizard:
         self._cancelled = False
         self._submitted = False
         self._modal_submitted = False
+
     async def start(self, interaction: discord.Interaction):
         modal = NickTierModal(self)
         await interaction.response.send_modal(modal)
         asyncio.create_task(self._modal_cleanup_guard())
+
     async def start_item_steps(self, interaction: discord.Interaction):
         self._step = 2
         if self.active_form_items:
             await self._show_item_step(interaction)
         else:
             await self._show_summary(interaction)
+
     async def _modal_cleanup_guard(self):
         await asyncio.sleep(180)
         if not self._modal_submitted and not self._submitted and not self._cancelled:
             log.info(f"[WIZARD] Modal timeout untuk {self.user.id}")
             _active_wizards.pop(self.user.id, None)
+
     async def show_tier_step(self, interaction: discord.Interaction):
         view = TierSelectView(self)
         total = len(FORM_ITEMS) + 1 if FORM_ITEMS else 1
@@ -672,6 +715,7 @@ class ClaimWizard:
             self._resp_msg = await interaction.original_response()
         else:
             await interaction.response.edit_message(content=content, view=view)
+
     async def advance(self, interaction: discord.Interaction):
         if self.tier and not self._item_steps_started():
             if self.active_form_items:
@@ -688,11 +732,14 @@ class ClaimWizard:
                 await self._show_item_step(interaction)
             else:
                 await self._show_summary(interaction)
+
     def _item_steps_started(self) -> bool:
         return self._step >= 2
+
     @property
     def active_form_items(self) -> list:
         return get_form_items(self.tier)
+
     async def _show_item_step(self, interaction: discord.Interaction):
         item_idx = self._step - 2
         item = self.active_form_items[item_idx]
@@ -705,6 +752,7 @@ class ClaimWizard:
             self._resp_msg = await interaction.original_response()
         else:
             await interaction.response.edit_message(content=content, view=view)
+
     async def _show_summary(self, interaction: discord.Interaction):
         lines = [f"**🎫 Summary Claim**\n`{self.nick}` [{self.tier}]\n"]
         tier_items = self.active_form_items
@@ -722,6 +770,7 @@ class ClaimWizard:
             self._resp_msg = await interaction.original_response()
         else:
             await interaction.response.edit_message(content=content, view=view)
+
     async def submit(self, interaction: discord.Interaction):
         if self._submitted:
             return
@@ -732,8 +781,8 @@ class ClaimWizard:
             await interaction.response.send_message(content=f"⏳ Memproses claim `{self.nick}` [{self.tier}]...", ephemeral=True)
             self._resp_msg = await interaction.original_response()
         tier_lower = get_panel(self.tier)
-        counts = claim_counts_high if tier_lower == "high" else claim_counts_medium
-        queue = pending_high if tier_lower == "high" else pending_medium
+        counts    = claim_counts_high if tier_lower == "high" else claim_counts_medium
+        queue     = pending_high if tier_lower == "high" else pending_medium
         processed = processed_high if tier_lower == "high" else processed_medium
         if self.user.id not in WHITELIST_IDS:
             if MAX_CLAIM > 0 and counts.get(self.user.id, 0) >= MAX_CLAIM:
@@ -750,8 +799,8 @@ class ClaimWizard:
         }
         ip_key = _make_ip_key(entry)
         with lock:
-            already_pending = any(_make_ip_key(e) == ip_key for e in queue)
-            already_processed = ip_key in processed
+            already_pending    = any(_make_ip_key(e) == ip_key for e in queue)
+            already_processed  = ip_key in processed
             already_inprogress = ip_key in (in_progress_high if tier_lower == "high" else in_progress_medium)
             if already_pending or already_processed or already_inprogress:
                 await interaction.edit_original_response(content=f"⚠️ Claim `{self.nick}` sudah ada di antrian.")
@@ -766,6 +815,7 @@ class ClaimWizard:
         log.info(f"[SUBMIT-{tier_lower.upper()}] + {self.nick} | author: {self.user.id}")
         await interaction.edit_original_response(content=f"✅ Claim `{self.nick}` [{self.tier}] berhasil disubmit!")
         _active_wizards.pop(self.user.id, None)
+
     async def restart(self, interaction: discord.Interaction):
         self.nick = ""
         self.tier = ""
@@ -774,12 +824,14 @@ class ClaimWizard:
         self._modal_submitted = False
         modal = NickTierModal(self)
         await interaction.response.send_modal(modal)
+
     async def cancel(self, interaction: discord.Interaction):
         if self._cancelled:
             return
         self._cancelled = True
         _active_wizards.pop(self.user.id, None)
         await interaction.response.edit_message(content="❌ Claim dibatalkan.", view=None)
+
     async def on_timeout(self):
         if self._submitted or self._cancelled:
             return
@@ -793,10 +845,8 @@ class ClaimWizard:
 _active_wizards: dict[int, ClaimWizard] = {}
 
 # ============================================================
-#  PANEL PERSISTENT (fix untuk Railway)
+#  PANEL PERSISTENT
 # ============================================================
-PANEL_FILE = os.path.join(DATA_DIR, "panel_msg.json")
-
 def _load_panel_msg_id() -> int | None:
     try:
         with open(PANEL_FILE, "r") as f:
@@ -806,13 +856,7 @@ def _load_panel_msg_id() -> int | None:
         return None
 
 def _save_panel_msg_id(msg_id: int):
-    try:
-        tmp = PANEL_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump({"message_id": msg_id}, f)
-        os.replace(tmp, PANEL_FILE)
-    except Exception as e:
-        log.warning(f"[WARN] Gagal simpan panel_msg.json: {e}")
+    _safe_save(PANEL_FILE, {"message_id": msg_id})
 
 _panel_msg_id: int | None = _load_panel_msg_id()
 
@@ -843,6 +887,7 @@ class PanelTierSelect(ui.Select):
     def __init__(self):
         options = [discord.SelectOption(label=t["label"], value=t["label"], emoji=t.get("emoji", "🎫")) for t in CLAIM_TIERS]
         super().__init__(placeholder="Pilih paket claim...", options=options, custom_id="panel_tier_select")
+
     async def callback(self, interaction: discord.Interaction):
         tier_label = self.values[0]
         self.values.clear()
@@ -868,6 +913,7 @@ class PanelTierSelect(ui.Select):
         except discord.HTTPException as e:
             log.warning(f"[PANEL-SELECT] HTTP error: {e}")
             _active_wizards.pop(interaction.user.id, None)
+
     async def _reset_panel(self, interaction: discord.Interaction):
         try:
             if interaction.response.is_done():
@@ -895,14 +941,11 @@ async def _setup_persistent_panel():
         log.warning(f"[PANEL] Gagal fetch claim channel: {e}")
         return
 
-    # Cari panel existing berdasarkan custom_id komponen (lebih unik)
     found_msg = None
     try:
-        # Scan 200 pesan terakhir (cukup untuk hindari kehilangan)
         async for msg in ch.history(limit=200):
             if msg.author != client.user:
                 continue
-            # Periksa apakah pesan memiliki komponen Select dengan custom_id "panel_tier_select"
             if msg.components:
                 for row in msg.components:
                     for component in row.children:
@@ -919,17 +962,15 @@ async def _setup_persistent_panel():
     view = PanelView()
     if found_msg:
         try:
-            # Update embed dan re-attach view
             await found_msg.edit(embed=_build_panel_embed(), view=view)
             client.add_view(view, message_id=found_msg.id)
             _panel_msg_id = found_msg.id
-            _save_panel_msg_id(found_msg.id)  # simpan sebagai cadangan (meski nanti hilang)
+            _save_panel_msg_id(found_msg.id)
             log.info(f"[PANEL] Panel existing ditemukan dan diperbarui (id={_panel_msg_id})")
             return
         except Exception as e:
             log.warning(f"[PANEL] Gagal edit panel existing: {e}")
 
-    # Jika tidak ada panel lama atau gagal edit, buat baru
     try:
         msg = await ch.send(embed=_build_panel_embed(), view=view)
         _panel_msg_id = msg.id
@@ -940,7 +981,7 @@ async def _setup_persistent_panel():
         log.warning(f"[PANEL] Gagal post panel: {e}")
 
 # ============================================================
-#  FLASK SERVER (fix untuk Railway)
+#  FLASK SERVER
 # ============================================================
 app = Flask(__name__)
 CORS(app, origins=["*"], allow_headers=["Content-Type", "X-GCP-Token"], methods=["GET", "POST", "OPTIONS"])
@@ -951,24 +992,33 @@ def require_secret():
         return jsonify({"ok": False, "error": "Unauthorized"}), 403
     return None
 
-# Health check endpoint (tanpa auth) untuk Railway
 @app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({"status": "ok", "bot_ready": _bot_loop is not None}), 200
+    return jsonify({
+        "status": "ok",
+        "bot_ready": _bot_loop is not None,
+        "data_dir": DATA_DIR,
+        "pending_high": len(pending_high),
+        "pending_medium": len(pending_medium),
+    }), 200
 
 def _fmt_entry(e: dict) -> dict:
     return {
-        "nick": e["nick"], "tier_label": e.get("tier_label", ""), "tier": e["tier"],
-        "choices": e["choices"], "log_msg_id": str(e["log_msg_id"]) if e.get("log_msg_id") else None,
-        "log_ch_id": str(e["log_ch_id"]) if e.get("log_ch_id") else None, "gm_id": e.get("gm_id"),
+        "nick":       e["nick"],
+        "tier_label": e.get("tier_label", ""),
+        "tier":       e["tier"],
+        "choices":    e["choices"],
+        "log_msg_id": str(e["log_msg_id"]) if e.get("log_msg_id") else None,
+        "log_ch_id":  str(e["log_ch_id"]) if e.get("log_ch_id") else None,
+        "gm_id":      e.get("gm_id"),
     }
 
 def _process_result(queue: list, in_progress: dict, processed: OrderedDict, counts: dict, tier_label: str, data: dict):
-    nick = data.get("nick", "").strip()
-    status = data.get("status", "failed")
-    gm_id = data.get("gm_id", "unknown")
+    nick    = data.get("nick", "").strip()
+    status  = data.get("status", "failed")
+    gm_id   = data.get("gm_id", "unknown")
     gm_name = data.get("gm_name", "")
-    ip_key = data.get("ip_key", "").strip()
+    ip_key  = data.get("ip_key", "").strip()
     _touch_gm(gm_id, gm_name, "high" if tier_label == "HIGH" else "medium")
     log_ch_id = log_msg_id = None
     entry = None
@@ -977,7 +1027,7 @@ def _process_result(queue: list, in_progress: dict, processed: OrderedDict, coun
         return None, None, None, status
     with lock:
         if ip_key and ip_key in in_progress:
-            info = in_progress.pop(ip_key)
+            info  = in_progress.pop(ip_key)
             entry = info["entry"]
         else:
             for k, v in list(in_progress.items()):
@@ -991,9 +1041,9 @@ def _process_result(queue: list, in_progress: dict, processed: OrderedDict, coun
                 queue.remove(entry)
             except ValueError:
                 pass
-            log_ch_id = entry.get("log_ch_id")
+            log_ch_id  = entry.get("log_ch_id")
             log_msg_id = entry.get("log_msg_id")
-            author_id = entry["author_id"]
+            author_id  = entry["author_id"]
             log.info(f"[RESULT-{tier_label}] {nick} -> {status} (gm: {_gm_display(gm_id)})")
             if status == "success":
                 if author_id not in WHITELIST_IDS:
@@ -1011,12 +1061,12 @@ def _process_result(queue: list, in_progress: dict, processed: OrderedDict, coun
         schedule_dm(entry["author_id"], log_ch_id or 0, channel_key, status, nick)
     return entry, log_ch_id, log_msg_id, status
 
-# HIGH endpoints
+# ── HIGH endpoints ───────────────────────────────────────────
 @app.route('/pending/take', methods=['POST'])
 def take_pending_high():
     err = require_secret()
     if err: return err
-    body = request.json or {}
+    body    = request.json or {}
     gm_id   = body.get("gm_id", "unknown")
     gm_name = body.get("gm_name", "")
     _touch_gm(gm_id, gm_name, "high")
@@ -1025,7 +1075,7 @@ def take_pending_high():
         _cleanup_expired_inprogress()
         if not pending_high:
             return jsonify({"entry": None, "queue_size": 0, "commands": commands})
-        entry = None
+        entry   = None
         corrupt = []
         for e in pending_high:
             if not e.get("nick", "").strip():
@@ -1057,9 +1107,11 @@ def result_high():
     err = require_secret()
     if err: return err
     data = request.json or {}
-    entry, log_ch_id, log_msg_id, status = _process_result(pending_high, in_progress_high, processed_high, claim_counts_high, "HIGH", data)
+    entry, log_ch_id, log_msg_id, status = _process_result(
+        pending_high, in_progress_high, processed_high, claim_counts_high, "HIGH", data
+    )
     if not log_ch_id:
-        log_ch_id = data.get("log_ch_id")
+        log_ch_id  = data.get("log_ch_id")
         log_msg_id = data.get("log_msg_id")
     if log_ch_id and log_msg_id:
         emoji = EMOJI_SUCCESS if status == "success" else (EMOJI_SKIP if status == "already" else EMOJI_FAILED)
@@ -1085,12 +1137,12 @@ def clear_high():
         _save_processed()
     return jsonify({"ok": True})
 
-# MEDIUM endpoints
+# ── MEDIUM endpoints ─────────────────────────────────────────
 @app.route('/pending_medium/take', methods=['POST'])
 def take_pending_medium():
     err = require_secret()
     if err: return err
-    body = request.json or {}
+    body    = request.json or {}
     gm_id   = body.get("gm_id", "unknown")
     gm_name = body.get("gm_name", "")
     _touch_gm(gm_id, gm_name, "medium")
@@ -1099,7 +1151,7 @@ def take_pending_medium():
         _cleanup_expired_inprogress()
         if not pending_medium:
             return jsonify({"entry": None, "queue_size": 0, "commands": commands})
-        entry = None
+        entry   = None
         corrupt = []
         for e in pending_medium:
             if not e.get("nick", "").strip():
@@ -1131,9 +1183,11 @@ def result_medium():
     err = require_secret()
     if err: return err
     data = request.json or {}
-    entry, log_ch_id, log_msg_id, status = _process_result(pending_medium, in_progress_medium, processed_medium, claim_counts_medium, "MEDIUM", data)
+    entry, log_ch_id, log_msg_id, status = _process_result(
+        pending_medium, in_progress_medium, processed_medium, claim_counts_medium, "MEDIUM", data
+    )
     if not log_ch_id:
-        log_ch_id = data.get("log_ch_id")
+        log_ch_id  = data.get("log_ch_id")
         log_msg_id = data.get("log_msg_id")
     if log_ch_id and log_msg_id:
         emoji = EMOJI_SUCCESS if status == "success" else (EMOJI_SKIP if status == "already" else EMOJI_FAILED)
@@ -1187,8 +1241,10 @@ class _ClaimTriggerView(ui.View):
     def __init__(self, wizard: ClaimWizard):
         super().__init__(timeout=60)
         self.wizard = wizard
+
     async def on_timeout(self):
         _active_wizards.pop(self.wizard.user.id, None)
+
     @ui.button(label="🎫 Buka Form Claim", style=discord.ButtonStyle.primary)
     async def open_form(self, interaction: discord.Interaction, button: ui.Button):
         try:
@@ -1208,7 +1264,7 @@ async def on_message(message: discord.Message):
     if message.author.id not in ADMIN_IDS:
         await client.process_commands(message)
         return
-    cmd = message.content.strip().lower()
+    cmd   = message.content.strip().lower()
     parts = message.content.strip().split(maxsplit=1)
 
     if parts[0].lower() == "!stopgm":
@@ -1219,7 +1275,7 @@ async def on_message(message: discord.Message):
             channel_arg = "all"
             if tokens[-1].lower() in ("high", "medium", "all") and len(tokens) > 1:
                 channel_arg = tokens[-1].lower()
-                target_raw = " ".join(tokens[:-1])
+                target_raw  = " ".join(tokens[:-1])
             else:
                 target_raw = parts[1]
             gid = _find_gm_id(target_raw.strip())
@@ -1233,9 +1289,10 @@ async def on_message(message: discord.Message):
                     f"— akan dieksekusi saat extension poll berikutnya (±5 detik)."
                 )
         asyncio.ensure_future(_auto_delete(sent, AUTO_DELETE_SECONDS))
+
     elif cmd == "!listgm":
         with lock:
-            now = datetime.now(timezone.utc)
+            now   = datetime.now(timezone.utc)
             lines = ["📋 **Daftar GM**"]
             if not gm_registry:
                 lines.append("_(belum ada GM yang pernah konek)_")
@@ -1245,7 +1302,7 @@ async def on_message(message: discord.Message):
                 raw  = v.get("last_seen")
                 if raw:
                     try:
-                        delta = (now - datetime.fromisoformat(raw)).total_seconds()
+                        delta      = (now - datetime.fromisoformat(raw)).total_seconds()
                         status_txt = f"🟢 online ({ch})" if delta < GM_ONLINE_THRESHOLD_SECONDS else f"⚪ idle {int(delta)}s lalu ({ch})"
                     except Exception:
                         status_txt = "❓"
@@ -1256,12 +1313,14 @@ async def on_message(message: discord.Message):
                 lines.append(f"• **{name}** — `{gid}` — {status_txt}{cmd_note}")
         sent = await message.reply("\n".join(lines))
         asyncio.ensure_future(_auto_delete(sent, AUTO_DELETE_SECONDS))
+
     elif cmd == "!resetclaims":
         claim_counts_high.clear()
         claim_counts_medium.clear()
         _save_claims()
         sent = await message.reply("✅ Claim counts direset.")
         asyncio.ensure_future(_auto_delete(sent, AUTO_DELETE_SECONDS))
+
     elif parts[0].lower() == "!resetdmnick":
         if len(parts) == 2:
             target = parts[1].strip().lower()
@@ -1280,6 +1339,7 @@ async def on_message(message: discord.Message):
                 _save_dm_nick_counts()
             sent = await message.reply("✅ Semua DM nick counter direset.")
         asyncio.ensure_future(_auto_delete(sent, AUTO_DELETE_SECONDS))
+
     elif cmd == "!resetpanel":
         _panel_msg_id = None
         try:
@@ -1290,6 +1350,7 @@ async def on_message(message: discord.Message):
         sent = await message.reply("🔄 Panel di-reset.")
         asyncio.ensure_future(_auto_delete(sent, AUTO_DELETE_SECONDS))
         await _setup_persistent_panel()
+
     elif cmd == "!updatepanel":
         sent = await message.reply("🔄 Memperbarui panel...")
         asyncio.ensure_future(_auto_delete(sent, AUTO_DELETE_SECONDS))
@@ -1304,7 +1365,7 @@ async def on_message(message: discord.Message):
                 except Exception:
                     pass
                 _panel_msg_id = None
-            view = PanelView()
+            view    = PanelView()
             new_msg = await ch.send(embed=_build_panel_embed(), view=view)
             _panel_msg_id = new_msg.id
             client.add_view(view, message_id=new_msg.id)
@@ -1312,6 +1373,7 @@ async def on_message(message: discord.Message):
         except Exception as e:
             sent2 = await message.reply(f"❌ Gagal update panel: {e}")
         asyncio.ensure_future(_auto_delete(sent2, AUTO_DELETE_SECONDS))
+
     elif cmd == "!listclaims":
         with lock:
             lines = ["📋 **Daftar Claim**"]
@@ -1327,16 +1389,22 @@ async def on_message(message: discord.Message):
                 lines.append("_(belum ada claim)_")
         sent = await message.reply("\n".join(lines))
         asyncio.ensure_future(_auto_delete(sent, AUTO_DELETE_SECONDS))
+
     elif cmd == "!status":
         with lock:
             h = len(pending_high)
             m = len(pending_medium)
         sent = await message.reply(f"📊 **Status antrian**\nHigh: {h} pending\nMedium: {m} pending")
         asyncio.ensure_future(_auto_delete(sent, AUTO_DELETE_SECONDS))
+
+    elif cmd == "!datadir":
+        sent = await message.reply(f"📁 **Data directory:** `{DATA_DIR}`")
+        asyncio.ensure_future(_auto_delete(sent, AUTO_DELETE_SECONDS))
+
     elif cmd == "!synccmds":
         sent = await message.reply("🔄 Sync slash commands...")
         asyncio.ensure_future(_auto_delete(sent, AUTO_DELETE_SECONDS))
-        _sync_flag = os.path.join(DATA_DIR, "sync_done.flag")
+        _sync_flag = os.path.join(_BASE_DIR, "sync_done.flag")
         try:
             if GUILD_ID:
                 guild = discord.Object(id=GUILD_ID)
@@ -1352,24 +1420,20 @@ async def on_message(message: discord.Message):
         except Exception as e:
             sent2 = await message.reply(f"❌ Gagal sync: {e}")
         asyncio.ensure_future(_auto_delete(sent2, AUTO_DELETE_SECONDS))
+
     elif cmd == "!restartbot":
         sent = await message.reply("🔄 Bot sedang restart...")
         asyncio.ensure_future(_auto_delete(sent, AUTO_DELETE_SECONDS))
         await _graceful_shutdown("bot direstart")
         await asyncio.sleep(1)
         os.execv(sys.executable, [sys.executable] + sys.argv)
+
     elif cmd == "!stopbot":
         sent = await message.reply("❌ Bot dihentikan oleh admin.")
         asyncio.ensure_future(_auto_delete(sent, AUTO_DELETE_SECONDS))
         await _graceful_shutdown("bot dihentikan")
-    await client.process_commands(message)
 
-@client.event
-async def on_command_error(ctx, error):
-    # Semua command di-handle manual via on_message — suppress CommandNotFound
-    if isinstance(error, commands.CommandNotFound):
-        return
-    raise error
+    await client.process_commands(message)
 
 @client.event
 async def on_disconnect():
@@ -1379,17 +1443,19 @@ async def on_disconnect():
 async def on_ready():
     global _bot_loop
     _bot_loop = asyncio.get_event_loop()
+
     def _sigint_override(signum, frame):
         if not _shutting_down and _bot_loop and not _bot_loop.is_closed():
             asyncio.run_coroutine_threadsafe(_graceful_shutdown("dihentikan oleh launcher"), _bot_loop)
-    signal.signal(signal.SIGINT, _sigint_override)
+
+    signal.signal(signal.SIGINT,  _sigint_override)
     signal.signal(signal.SIGTERM, _sigint_override)
     try:
         signal.signal(signal.SIGBREAK, _sigint_override)
     except AttributeError:
         pass
 
-    _sync_flag = os.path.join(DATA_DIR, "sync_done.flag")
+    _sync_flag = os.path.join(_BASE_DIR, "sync_done.flag")
     _need_sync = not os.path.exists(_sync_flag)
     if _need_sync:
         try:
@@ -1411,6 +1477,7 @@ async def on_ready():
         log.info("[BOT] Slash commands sync dilewati (sudah sync).")
 
     log.info(f"[BOT] Login sebagai {client.user}")
+    log.info(f"[BOT] Data directory: {DATA_DIR}")
     log.info(f"[BOT] Claim channel: {CLAIM_CHANNEL}")
     log.info(f"[BOT] Log channel High: {LOG_CHANNEL_HIGH}")
     log.info(f"[BOT] Log channel Medium: {LOG_CHANNEL_MED}")
@@ -1419,10 +1486,9 @@ async def on_ready():
     await _setup_persistent_panel()
 
 # ============================================================
-#  MAIN (fix untuk Railway)
+#  MAIN
 # ============================================================
 if __name__ == '__main__':
-    # Ambil port dari environment variable Railway (PORT) atau fallback
     railway_port = int(os.environ.get("PORT", os.environ.get("FLASK_PORT", "8080")))
     railway_host = '0.0.0.0'
 
