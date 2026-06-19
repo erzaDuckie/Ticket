@@ -26,7 +26,14 @@ if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
 # ============================================================
 #  LOGGING — ke file dan konsol sekaligus
 # ============================================================
-_log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nick_watcher.log")
+# ============================================================
+#  DATA DIR — /data jika Railway volume tersedia, else local
+# ============================================================
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR  = "/data" if os.path.isdir("/data") else _BASE_DIR
+os.makedirs(DATA_DIR, exist_ok=True)
+
+_log_file = os.path.join(DATA_DIR, "nick_watcher.log")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(message)s",
@@ -88,7 +95,7 @@ AUTO_DELETE_SECONDS = int(os.environ.get("AUTO_DELETE_SECONDS", "60"))
 # ============================================================
 #  DM NICK COUNT — batasi berapa kali DM dikirim per nick
 # ============================================================
-DM_NICK_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dm_nick_counts.json")
+DM_NICK_FILE  = os.path.join(DATA_DIR, "dm_nick_counts.json")
 DM_NICK_LIMIT = int(os.environ.get("DM_NICK_LIMIT", "2"))
 
 def _load_dm_nick_counts() -> dict:
@@ -146,7 +153,7 @@ EMOJI_BLOCK   = "\U0001f6ab"    # 🚫
 # ============================================================
 #  PERSISTENT CLAIMS
 # ============================================================
-CLAIMS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claims.json")
+CLAIMS_FILE = os.path.join(DATA_DIR, "claims.json")
 
 def _load_claims():
     try:
@@ -175,8 +182,8 @@ claim_counts_high, claim_counts_medium = _load_claims()
 # ============================================================
 #  PERSISTENSI ANTRIAN
 # ============================================================
-PENDING_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pending_queue.json")
-PROCESSED_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "processed_queue.json")
+PENDING_FILE    = os.path.join(DATA_DIR, "pending_queue.json")
+PROCESSED_FILE  = os.path.join(DATA_DIR, "processed_queue.json")
 
 def _save_pending():
     try:
@@ -282,7 +289,7 @@ def _trim_processed(od: OrderedDict):
 # ============================================================
 #  GM REGISTRY — nama GM, status online, command queue (remote stop)
 # ============================================================
-GM_REGISTRY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gm_registry.json")
+GM_REGISTRY_FILE = os.path.join(DATA_DIR, "gm_registry.json")
 GM_ONLINE_THRESHOLD_SECONDS = 15  # dianggap online kalau heartbeat terakhir < ini
 
 def _load_gm_registry() -> dict:
@@ -788,7 +795,7 @@ _active_wizards: dict[int, ClaimWizard] = {}
 # ============================================================
 #  PANEL PERSISTENT (fix untuk Railway)
 # ============================================================
-PANEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel_msg.json")
+PANEL_FILE = os.path.join(DATA_DIR, "panel_msg.json")
 
 def _load_panel_msg_id() -> int | None:
     try:
@@ -1329,7 +1336,7 @@ async def on_message(message: discord.Message):
     elif cmd == "!synccmds":
         sent = await message.reply("🔄 Sync slash commands...")
         asyncio.ensure_future(_auto_delete(sent, AUTO_DELETE_SECONDS))
-        _sync_flag = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sync_done.flag")
+        _sync_flag = os.path.join(DATA_DIR, "sync_done.flag")
         try:
             if GUILD_ID:
                 guild = discord.Object(id=GUILD_ID)
@@ -1358,6 +1365,13 @@ async def on_message(message: discord.Message):
     await client.process_commands(message)
 
 @client.event
+async def on_command_error(ctx, error):
+    # Semua command di-handle manual via on_message — suppress CommandNotFound
+    if isinstance(error, commands.CommandNotFound):
+        return
+    raise error
+
+@client.event
 async def on_disconnect():
     log.info("[BOT] Koneksi Discord terputus.")
 
@@ -1375,7 +1389,7 @@ async def on_ready():
     except AttributeError:
         pass
 
-    _sync_flag = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sync_done.flag")
+    _sync_flag = os.path.join(DATA_DIR, "sync_done.flag")
     _need_sync = not os.path.exists(_sync_flag)
     if _need_sync:
         try:
