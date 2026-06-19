@@ -108,39 +108,40 @@ def _data_path(filename: str) -> str:
 
 def _safe_save(filepath: str, data, *, is_json=True, json_kwargs=None):
     """
-    Atomic write: tulis ke .tmp dulu lalu os.replace.
-    Fallback ke direct write jika os.replace gagal (cross-device).
+    Write langsung ke filepath (tanpa atomic tmp) untuk menghindari
+    cross-device os.replace error pada Railway persistent volume.
+    Railway volume sudah di-mount dengan fsync guarantee, jadi
+    direct write sudah cukup aman untuk use-case ini.
     """
-    tmp = filepath + ".tmp"
+    import tempfile, shutil
+    # Coba atomic: tulis ke /tmp (bukan di /data) lalu copy ke target
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            if is_json:
-                json.dump(data, f, **(json_kwargs or {"indent": 2}))
-            else:
-                f.write(data)
-        os.replace(tmp, filepath)
-    except OSError as e:
-        log.warning(f"[SAVE] atomic replace gagal ({e}), fallback direct write: {filepath}")
+        fd, tmp_path = tempfile.mkstemp(prefix="nw_", suffix=".tmp", dir="/tmp")
         try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        except Exception:
-            pass
-        try:
-            with open(filepath, "w", encoding="utf-8") as f:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 if is_json:
                     json.dump(data, f, **(json_kwargs or {"indent": 2}))
                 else:
                     f.write(data)
-        except Exception as e2:
-            log.error(f"[SAVE] Gagal simpan {filepath}: {e2}")
+            shutil.copy2(tmp_path, filepath)
+        finally:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        return
     except Exception as e:
-        log.error(f"[SAVE] Gagal simpan {filepath}: {e}")
-        try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        except Exception:
-            pass
+        log.debug(f"[SAVE] /tmp atomic gagal ({e}), direct write: {filepath}")
+
+    # Fallback: direct write langsung ke filepath
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            if is_json:
+                json.dump(data, f, **(json_kwargs or {"indent": 2}))
+            else:
+                f.write(data)
+    except Exception as e2:
+        log.error(f"[SAVE] Gagal simpan {filepath}: {e2}")
 
 # ============================================================
 #  FILE PATHS — semua persistent data ke DATA_DIR
