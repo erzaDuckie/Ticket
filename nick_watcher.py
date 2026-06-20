@@ -28,12 +28,16 @@ if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
 # ============================================================
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _log_file = os.path.join(_BASE_DIR, "nick_watcher.log")
+from logging.handlers import RotatingFileHandler
+# maxBytes=5MB, simpan 3 file backup (nick_watcher.log.1, .2, .3) lalu yang lama dibuang otomatis
+_log_max_bytes    = int(os.environ.get("LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+_log_backup_count = int(os.environ.get("LOG_BACKUP_COUNT", "3"))
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
-        logging.FileHandler(_log_file, encoding="utf-8"),
+        RotatingFileHandler(_log_file, maxBytes=_log_max_bytes, backupCount=_log_backup_count, encoding="utf-8"),
         logging.StreamHandler(sys.stdout),
     ]
 )
@@ -157,17 +161,53 @@ REQUIREMENTS_FILE = os.path.join(_BASE_DIR, "DM.json")  # config statis, di sour
 # ============================================================
 #  DM NICK COUNT — batasi berapa kali DM dikirim per nick
 # ============================================================
-DM_NICK_LIMIT = int(os.environ.get("DM_NICK_LIMIT", "2"))
+DM_NICK_LIMIT    = int(os.environ.get("DM_NICK_LIMIT", "2"))
+# Auto-bersih entry dm_nick_counts yang sudah lebih tua dari sekian hari (0 = nonaktif)
+DM_NICK_TTL_DAYS = int(os.environ.get("DM_NICK_TTL_DAYS", "30"))
+# Interval pengecekan cleanup berkala (jam)
+DM_NICK_CLEANUP_INTERVAL_HOURS = int(os.environ.get("DM_NICK_CLEANUP_INTERVAL_HOURS", "24"))
 
 def _load_dm_nick_counts() -> dict:
     try:
         with open(DM_NICK_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            raw = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
+    # Migrasi format lama {"nick:id": 2} -> {"nick:id": {"count": 2, "ts": "<iso>"}}
+    # Entry lama tanpa timestamp dikasih ts=sekarang supaya tidak langsung kebuang
+    # saat cleanup pertama kali jalan setelah update ini.
+    now_iso  = datetime.now(timezone.utc).isoformat()
+    migrated = {}
+    for k, v in raw.items():
+        if isinstance(v, dict):
+            migrated[k] = {"count": v.get("count", 0), "ts": v.get("ts") or now_iso}
+        else:
+            migrated[k] = {"count": v, "ts": now_iso}
+    return migrated
 
 def _save_dm_nick_counts():
     _safe_save(DM_NICK_FILE, dm_nick_counts)
+
+def _cleanup_dm_nick_counts() -> int:
+    """Hapus entry dm_nick_counts yang sudah lebih tua dari DM_NICK_TTL_DAYS.
+    Return jumlah entry yang dihapus."""
+    if DM_NICK_TTL_DAYS <= 0:
+        return 0
+    cutoff  = datetime.now(timezone.utc) - timedelta(days=DM_NICK_TTL_DAYS)
+    removed = 0
+    with lock:
+        for k in list(dm_nick_counts.keys()):
+            ts_raw = dm_nick_counts[k].get("ts")
+            try:
+                ts = datetime.fromisoformat(ts_raw) if ts_raw else None
+            except (TypeError, ValueError):
+                ts = None
+            if ts is None or ts < cutoff:
+                del dm_nick_counts[k]
+                removed += 1
+        if removed:
+            _save_dm_nick_counts()
+    return removed
 
 dm_nick_counts: dict = _load_dm_nick_counts()
 
@@ -463,11 +503,15 @@ def schedule_dm(author_id: int, log_ch_id: int, channel_key: str, status: str, n
     if status in ("not_req", "already"):
         dm_key = f"{nick.lower()}:{author_id}"
         with lock:
-            count = dm_nick_counts.get(dm_key, 0)
+            entry = dm_nick_counts.get(dm_key, {"count": 0, "ts": None})
+            count = entry.get("count", 0)
             if DM_NICK_LIMIT > 0 and count >= DM_NICK_LIMIT:
                 log.info(f"[DM-SKIP] Limit {DM_NICK_LIMIT}x untuk {dm_key}")
                 return
-            dm_nick_counts[dm_key] = count + 1
+            dm_nick_counts[dm_key] = {
+                "count": count + 1,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
             _save_dm_nick_counts()
     async def _do():
         try:
@@ -1341,6 +1385,16 @@ async def on_message(message: discord.Message):
             sent = await message.reply("✅ Semua DM nick counter direset.")
         asyncio.ensure_future(_auto_delete(sent, AUTO_DELETE_SECONDS))
 
+    elif cmd == "!cleandmnick":
+        removed = _cleanup_dm_nick_counts()
+        sisa = len(dm_nick_counts)
+        sent = await message.reply(
+            f"🧹 Cleanup `dm_nick_counts` selesai.\n"
+            f"Dihapus: **{removed}** entry (TTL {DM_NICK_TTL_DAYS} hari)\n"
+            f"Sisa: **{sisa}** entry"
+        )
+        asyncio.ensure_future(_auto_delete(sent, AUTO_DELETE_SECONDS))
+
     elif cmd == "!resetpanel":
         _panel_msg_id = None
         try:
@@ -1440,6 +1494,16 @@ async def on_message(message: discord.Message):
 async def on_disconnect():
     log.info("[BOT] Koneksi Discord terputus.")
 
+async def _dm_nick_cleanup_loop():
+    """Jalan di background, cek & buang entry dm_nick_counts yang expired secara berkala."""
+    while not _shutting_down:
+        await asyncio.sleep(DM_NICK_CLEANUP_INTERVAL_HOURS * 3600)
+        if _shutting_down:
+            break
+        removed = _cleanup_dm_nick_counts()
+        if removed:
+            log.info(f"[DM-CLEANUP] {removed} entry dm_nick_counts expired dibuang (periodic)")
+
 @client.event
 async def on_ready():
     global _bot_loop
@@ -1484,6 +1548,12 @@ async def on_ready():
     log.info(f"[BOT] Log channel Medium: {LOG_CHANNEL_MED}")
     log.info(f"[BOT] Admin IDs: {ADMIN_IDS}")
     log.info(f"[BOT] Max claim: {MAX_CLAIM if MAX_CLAIM > 0 else 'UNLIMITED'}")
+
+    removed = _cleanup_dm_nick_counts()
+    if removed:
+        log.info(f"[DM-CLEANUP] {removed} entry dm_nick_counts expired dibuang saat startup")
+    asyncio.ensure_future(_dm_nick_cleanup_loop())
+
     await _setup_persistent_panel()
 
 # ============================================================
