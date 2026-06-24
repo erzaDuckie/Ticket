@@ -24,10 +24,13 @@ if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 # ============================================================
-#  LOGGING — ke file dan konsol sekaligus
+#  LOGGING — ke file (/tmp, BUKAN volume) dan konsol sekaligus
+#  FIX: _log_file dipindah ke /tmp agar tidak memakan Railway volume.
+#  /tmp bersifat sementara (reset tiap redeploy) tapi cukup untuk
+#  keperluan ekstensi yang baca log real-time.
 # ============================================================
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-_log_file = os.path.join(_BASE_DIR, "nick_watcher.log")
+_log_file = "/tmp/nick_watcher.log"  # <-- FIX: pakai /tmp, bukan _BASE_DIR (volume)
 from logging.handlers import RotatingFileHandler
 # maxBytes=5MB, simpan 3 file backup (nick_watcher.log.1, .2, .3) lalu yang lama dibuang otomatis
 _log_max_bytes    = int(os.environ.get("LOG_MAX_BYTES", str(5 * 1024 * 1024)))
@@ -42,6 +45,11 @@ logging.basicConfig(
     ]
 )
 log = logging.getLogger(__name__)
+# FIX: Matikan log verbose dari discord.py internal (RESUMED session, dll)
+# Log ini sangat banyak dan tidak berguna untuk bot ini
+logging.getLogger("discord").setLevel(logging.WARNING)
+logging.getLogger("discord.gateway").setLevel(logging.WARNING)
+logging.getLogger("discord.http").setLevel(logging.WARNING)
 
 # ============================================================
 #  LOAD CONFIG
